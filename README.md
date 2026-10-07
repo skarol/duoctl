@@ -1,11 +1,22 @@
-# duoctl
+<h1 align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/wordmark-dark.png">
+    <img alt="duoctl" src="docs/wordmark-light.png" width="360">
+  </picture>
+</h1>
 
-Fold, rotate and touch the **iPhone Duo simulator** from the command line — built for
-scripts and AI coding agents.
+<p align="center">
+  Fold, rotate and touch the <b>iPhone Duo simulator</b> from the command line —<br>
+  built for scripts and AI coding agents.
+</p>
+
+<p align="center">
+  <img alt="duoctl unfolding, tapping, swiping, rotating and half-folding the iPhone Duo simulator in Xcode's Device Hub" src="docs/demo.gif" width="560">
+</p>
 
 ```bash
 duoctl close                     # fold shut: the cover screen takes over
-duoctl open                      # unfold flat: the inner screen takes over
+duoctl open --duration 1.5       # unfold flat, animated: the inner screen takes over
 duoctl rotate portrait           # rotate the active screen's interface
 duoctl tap --label "Continue"    # tap — on the inner screen too
 duoctl swipe 330 800 330 300     # scroll
@@ -75,8 +86,8 @@ duoctl screenshot unfolded-portrait.png
 duoctl [-d <udid|name>] <command>
 
 state                                   print state as JSON
-open | close | half                     set the hinge to 180° / 0° / 90°
-hinge <degrees>                         set any hinge angle, 0 (closed) to 180 (flat)
+open | close | half [--duration s]      set the hinge to 180° / 0° / 90°
+hinge <degrees> [--duration s]          set any hinge angle, 0 (closed) to 180 (flat)
 rotate <orientation>                    portrait | landscape | portrait-upside-down | landscape-flipped
 tap <x> <y> | --label L | --id I        tap (interface points of the active screen)
 long-press <x> <y> [--duration s]       press and hold
@@ -84,6 +95,9 @@ swipe <x1> <y1> <x2> <y2> [--duration]  drag between two points
 screenshot <path>                       PNG of the screen showing the interface
 elements                                labelled accessibility elements with frames
 ```
+
+`--duration` animates the fold from the current angle instead of jumping, which makes
+Device Hub play a smooth fold — useful for recordings.
 
 With one iPhone Duo booted, `duoctl` uses it. With several, pass `-d` or set
 `DUOCTL_UDID` — it never guesses.

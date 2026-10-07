@@ -173,8 +173,12 @@ def expected_screen(degrees):
     return None
 
 
-def set_hinge(udid, degrees):
-    helper(udid, "hinge", degrees)
+def set_hinge(udid, degrees, duration=0):
+    if duration > 0:
+        current = hinge_angle(udid)
+        helper(udid, "hinge-sweep", 180 if current is None else current, degrees, duration)
+    else:
+        helper(udid, "hinge", degrees)
     expected = expected_screen(degrees)
     deadline = time.time() + SCREEN_SWITCH_TIMEOUT
     while time.time() < deadline:
@@ -319,9 +323,12 @@ def main():
 
     commands.add_parser("state", help="print hinge angle, active screen, orientation and size as JSON")
     for posture in ("open", "close", "half"):
-        commands.add_parser(posture, help=f"set the hinge to {POSTURES[posture]}°")
+        command = commands.add_parser(posture, help=f"set the hinge to {POSTURES[posture]}°")
+        command.add_argument("--duration", type=float, default=0,
+                             help="seconds to animate the fold over (default: instant)")
     hinge = commands.add_parser("hinge", help="set the hinge angle (0 closed … 180 flat)")
     hinge.add_argument("degrees", type=float)
+    hinge.add_argument("--duration", type=float, default=0, help="seconds to animate the fold over (default: instant)")
 
     rotate_cmd = commands.add_parser("rotate", help="rotate the active screen's interface")
     rotate_cmd.add_argument("orientation", choices=list(ROTATION_FOR_UI))
@@ -353,10 +360,10 @@ def main():
         if args.command == "state":
             print(json.dumps(state(udid), indent=2))
         elif args.command in POSTURES:
-            set_hinge(udid, POSTURES[args.command])
+            set_hinge(udid, POSTURES[args.command], args.duration)
             print(json.dumps(state(udid), indent=2))
         elif args.command == "hinge":
-            set_hinge(udid, args.degrees)
+            set_hinge(udid, args.degrees, args.duration)
             print(json.dumps(state(udid), indent=2))
         elif args.command == "rotate":
             rotate(udid, args.orientation)

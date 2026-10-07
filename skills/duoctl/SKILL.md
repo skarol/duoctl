@@ -14,7 +14,8 @@ It picks the only booted iPhone Duo automatically; when several are booted, pass
 ```bash
 scripts/duoctl state                       # JSON: hingeAngle, activeScreen (cover|inner), orientation, sizePoints
 scripts/duoctl close | open | half         # 0° / 180° / 90°; waits until the right screen is active
-scripts/duoctl hinge 120                   # any angle 0…180
+scripts/duoctl open --duration 1.5         # animate the fold instead of jumping (for recordings)
+scripts/duoctl hinge 120                   # any angle 0…180, also takes --duration
 scripts/duoctl rotate portrait             # portrait | landscape | portrait-upside-down | landscape-flipped
 scripts/duoctl tap 120 340                 # interface points of the active screen
 scripts/duoctl tap --label "Done" --type Button

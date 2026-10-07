@@ -2,6 +2,7 @@
 // posts the private HID events Xcode's Device Hub uses for the iPhone Duo.
 //
 //   duoctl-helper hinge <degrees>                     0 = closed, 180 = flat
+//   duoctl-helper hinge-sweep <from> <to> <seconds>   animate the hinge between two angles
 //   duoctl-helper orientation <value>                 portrait | pud | landscape-left | landscape-right | faceup | facedown
 //   duoctl-helper tap <displayUUID> <nx> <ny> [hold-seconds]
 //   duoctl-helper swipe <displayUUID> <nx1> <ny1> <nx2> <ny2> [seconds]
@@ -64,12 +65,7 @@ static const double kMoveRate = 60.0;
 
 #pragma mark - Device state (hinge, orientation)
 
-static int postDeviceState(NSString *source, NSString *type, id value) {
-    IOHIDEventSystemClientRef client = IOHIDEventSystemClientCreateWithType(NULL, kClientTypeSimple, NULL);
-    if (!client) {
-        fprintf(stderr, "duoctl-helper: could not create a HID event system client\n");
-        return 1;
-    }
+static void dispatchDeviceState(IOHIDEventSystemClientRef client, NSString *source, NSString *type, id value) {
     NSDictionary *payload = @{
         @"provider": @"com.apple.Virtualization",
         @"source": source,
@@ -81,9 +77,40 @@ static int postDeviceState(NSString *source, NSString *type, id value) {
                                                              0, data.bytes, (CFIndex)data.length, 0);
     IOHIDEventSystemClientDispatchEvent(client, event);
     CFRelease(event);
-    // The event system delivers asynchronously; exiting at once can drop the event.
+}
+
+static IOHIDEventSystemClientRef deviceStateClient(void) {
+    IOHIDEventSystemClientRef client = IOHIDEventSystemClientCreateWithType(NULL, kClientTypeSimple, NULL);
+    if (!client) fprintf(stderr, "duoctl-helper: could not create a HID event system client\n");
+    return client;
+}
+
+static void finishDeviceState(IOHIDEventSystemClientRef client) {
+    // The event system delivers asynchronously; exiting at once can drop the last event.
     usleep(100000);
     CFRelease(client);
+}
+
+static int postDeviceState(NSString *source, NSString *type, id value) {
+    IOHIDEventSystemClientRef client = deviceStateClient();
+    if (!client) return 1;
+    dispatchDeviceState(client, source, type, value);
+    finishDeviceState(client);
+    return 0;
+}
+
+/// Moves the hinge in small steps so the fold animates instead of jumping.
+static int sweepHinge(double from, double to, double seconds) {
+    IOHIDEventSystemClientRef client = deviceStateClient();
+    if (!client) return 1;
+    int steps = MAX(1, (int)(seconds * kMoveRate));
+    for (int step = 1; step <= steps; step++) {
+        double t = (double)step / steps;
+        double eased = t * t * (3 - 2 * t);
+        dispatchDeviceState(client, @"hinge-slider-control", @"range", @(from + (to - from) * eased));
+        if (step < steps) usleep((useconds_t)(1e6 / kMoveRate));
+    }
+    finishDeviceState(client);
     return 0;
 }
 
@@ -236,6 +263,7 @@ static int swipe(NSString *displayUUID, double x1, double y1, double x2, double 
 static int usage(void) {
     fprintf(stderr,
             "usage: duoctl-helper hinge <degrees>\n"
+            "       duoctl-helper hinge-sweep <from> <to> <seconds>\n"
             "       duoctl-helper orientation <portrait|pud|landscape-left|landscape-right|faceup|facedown>\n"
             "       duoctl-helper tap <displayUUID> <nx> <ny> [hold-seconds]\n"
             "       duoctl-helper swipe <displayUUID> <nx1> <ny1> <nx2> <ny2> [seconds]\n"
@@ -251,6 +279,10 @@ int main(int argc, char **argv) {
         if ([command isEqualToString:@"hinge"] && argc == 3) {
             double degrees = fmin(fmax(atof(argv[2]), 0), 180);
             return postDeviceState(@"hinge-slider-control", @"range", @(degrees));
+        }
+        if ([command isEqualToString:@"hinge-sweep"] && argc == 5) {
+            double from = fmin(fmax(atof(argv[2]), 0), 180), to = fmin(fmax(atof(argv[3]), 0), 180);
+            return sweepHinge(from, to, fmax(atof(argv[4]), 0));
         }
         if ([command isEqualToString:@"orientation"] && argc == 3) {
             NSSet *valid = [NSSet setWithArray:@[ @"portrait", @"pud", @"landscape-left", @"landscape-right",
