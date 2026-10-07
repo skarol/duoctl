@@ -24,12 +24,22 @@ duoctl screenshot shot.png       # capture whichever screen is showing
 duoctl state                     # hinge angle, active screen, orientation, size
 ```
 
-Xcode 27.1's Device Hub can fold and rotate the Duo, but nothing scriptable can:
-`simctl` has no hinge or rotation command, `devicectl device orientation set` reports
-success and changes nothing, and `XCUIDevice.shared.orientation` is ignored. Taps are
-worse: AXe, idb, XcodeBuildMCP and similar tools deliver every touch to the cover
-screen's touchscreen, so on an unfolded Duo they report success and nothing happens.
-`duoctl` fixes all three.
+## Why
+
+Xcode 27.1 ships an iPhone Duo simulator, and Device Hub can fold it, rotate it and tap
+either screen — by hand. Nothing scriptable could, which leaves the unfolded inner
+screen untestable for CI and AI coding agents:
+
+| You want to… | What exists today | duoctl |
+|---|---|---|
+| Fold or unfold | `simctl` and `devicectl` have no hinge command | `duoctl close`, `open`, `half`, `hinge <deg>` |
+| Rotate | `devicectl device orientation set` and `XCUIDevice.shared.orientation` report success and change nothing | `duoctl rotate portrait` |
+| Tap the inner screen | AXe (built on idb), XcodeBuildMCP and RocketSim deliver every touch to the *cover* screen, so on an unfolded Duo they report success and nothing happens | `duoctl tap`, `long-press`, `swipe` |
+| Screenshot what's showing | `simctl io screenshot` captures the inner screen even while folded (a black image) | `duoctl screenshot` |
+
+The silent failures are the worst part: every one of those calls exits 0, so a script or
+an agent carries on as if it worked. `duoctl` reads the device state back after every fold
+and rotation, and fails with an error when it didn't happen.
 
 ## Requirements
 
