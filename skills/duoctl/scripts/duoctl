@@ -1,0 +1,386 @@
+#!/usr/bin/env python3
+"""duoctl — fold, rotate and touch the iPhone Duo simulator from the command line.
+
+Built for scripts and AI coding agents. Requires Xcode 27.1+ with the iOS 27.1
+simulator runtime and a booted iPhone Duo simulator.
+"""
+
+import argparse
+import hashlib
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+from pathlib import Path
+
+VERSION = "0.1.0"
+HELPER_SOURCE = Path(__file__).resolve().parent / "duoctl-helper.m"
+CACHE_DIR = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "duoctl"
+DUO_DEVICE_TYPE = re.compile(r"iPhone-Duo", re.IGNORECASE)
+SETTLE_SECONDS = 0.6
+SCREEN_SWITCH_TIMEOUT = 8
+COVER_MAX_DEGREES = 30
+INNER_MIN_DEGREES = 120
+
+# Device orientations to try, in order, when looking for a display rotation.
+DEVICE_ORIENTATIONS = ["portrait", "landscape-left", "landscape-right", "pud"]
+ROTATION_FOR_UI = {
+    "portrait": "rot0",
+    "landscape": "rot90",
+    "portrait-upside-down": "rot180",
+    "landscape-flipped": "rot270",
+}
+POSTURES = {"close": 0, "closed": 0, "half": 90, "open": 180, "flat": 180}
+
+
+class DuoError(Exception):
+    pass
+
+
+def run(args, check=True, capture=True):
+    result = subprocess.run(args, capture_output=capture, text=True)
+    if check and result.returncode != 0:
+        raise DuoError(f"{' '.join(args)} failed:\n{(result.stderr or result.stdout).strip()}")
+    return result
+
+
+# ---------------------------------------------------------------- device lookup
+
+
+def booted_duos():
+    data = json.loads(run(["xcrun", "simctl", "list", "devices", "booted", "-j"]).stdout)
+    return [
+        device
+        for devices in data["devices"].values()
+        for device in devices
+        if device.get("state") == "Booted" and DUO_DEVICE_TYPE.search(device.get("deviceTypeIdentifier", ""))
+    ]
+
+
+def resolve_udid(requested):
+    duos = booted_duos()
+    if requested:
+        for device in duos:
+            if requested in (device["udid"], device["name"]):
+                return device["udid"]
+        raise DuoError(f'no booted iPhone Duo simulator matches "{requested}"')
+    if len(duos) == 1:
+        return duos[0]["udid"]
+    if not duos:
+        raise DuoError("no booted iPhone Duo simulator (boot one, or pass -d <udid>)")
+    listing = "\n".join(f"  {d['udid']}  {d['name']}" for d in duos)
+    raise DuoError(f"several iPhone Duo simulators are booted; pass -d <udid> or set DUOCTL_UDID:\n{listing}")
+
+
+# ---------------------------------------------------------------- in-simulator helper
+
+
+def helper_path():
+    developer_dir = run(["xcode-select", "-p"]).stdout.strip()
+    key = hashlib.sha256(HELPER_SOURCE.read_bytes() + developer_dir.encode()).hexdigest()[:12]
+    binary = CACHE_DIR / f"duoctl-helper-{key}"
+    if binary.exists():
+        return binary
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(dir=CACHE_DIR) as tmp:
+        built = Path(tmp) / "duoctl-helper"
+        run([
+            "xcrun", "-sdk", "iphonesimulator", "clang", "-fobjc-arc", "-O2",
+            "-arch", "arm64", "-mios-simulator-version-min=17.0",
+            "-framework", "Foundation", "-framework", "IOKit",
+            str(HELPER_SOURCE), "-o", str(built),
+        ])
+        run(["codesign", "-f", "-s", "-", str(built)])
+        built.replace(binary)
+    return binary
+
+
+def helper(udid, *args):
+    run(["xcrun", "simctl", "spawn", udid, str(helper_path()), *map(str, args)])
+
+
+# ---------------------------------------------------------------- state
+
+
+def displays(udid):
+    data = json.loads(run(["xcrun", "devicectl", "device", "info", "displays", "-d", udid, "--json-output", "-"]).stdout)
+    return [d for d in data["result"]["displays"] if d.get("name", "").startswith("LCD")]
+
+
+def active_display(udid):
+    for display in displays(udid):
+        if display.get("active"):
+            return display
+    raise DuoError("no display is active (is the simulator still booting?)")
+
+
+def ui_size(display):
+    """Size in points of the display as the interface currently sees it."""
+    (_, _), (width, height) = display["bounds"]
+    scale = display.get("pointScale") or 1
+    width, height = width / scale, height / scale
+    if display.get("currentOrientation") in ("rot90", "rot270"):
+        width, height = height, width
+    return width, height
+
+
+def hinge_angle(udid):
+    process = subprocess.Popen(
+        ["xcrun", "devicectl", "device", "motion", "hinge-angle", "-d", udid],
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+    )
+    try:
+        deadline = time.time() + 10
+        for line in process.stdout:
+            match = re.search(r"\bAngle:\s*(\d+(?:[.,]\d+)?)", line)
+            if match:
+                return float(match.group(1).replace(",", "."))
+            if time.time() > deadline:
+                break
+    finally:
+        process.kill()
+    return None
+
+
+def state(udid):
+    display = active_display(udid)
+    width, height = ui_size(display)
+    return {
+        "udid": udid,
+        "hingeAngle": hinge_angle(udid),
+        "activeScreen": "cover" if display.get("primary") else "inner",
+        "displayId": display["displayId"],
+        "displayUUID": display["uniqueId"],
+        "rotation": display.get("currentOrientation"),
+        "orientation": next((k for k, v in ROTATION_FOR_UI.items() if v == display.get("currentOrientation")), None),
+        "sizePoints": [round(width, 2), round(height, 2)],
+    }
+
+
+# ---------------------------------------------------------------- actions
+
+
+def expected_screen(degrees):
+    # The Duo hands over between screens somewhere in the middle of the range.
+    if degrees <= COVER_MAX_DEGREES:
+        return "cover"
+    if degrees >= INNER_MIN_DEGREES:
+        return "inner"
+    return None
+
+
+def set_hinge(udid, degrees):
+    helper(udid, "hinge", degrees)
+    expected = expected_screen(degrees)
+    deadline = time.time() + SCREEN_SWITCH_TIMEOUT
+    while time.time() < deadline:
+        time.sleep(SETTLE_SECONDS)
+        display = active_display(udid)
+        if expected is None or ("cover" if display.get("primary") else "inner") == expected:
+            return
+    raise DuoError(f"the {expected} screen did not become active after setting the hinge to {degrees:g}°")
+
+
+def rotate(udid, orientation):
+    """Rotate the active screen until its interface is in `orientation`.
+
+    The device orientation that produces a given rotation differs per screen
+    (the inner screen sits a quarter turn from the cover), so try each one and
+    read the result back.
+    """
+    target = ROTATION_FOR_UI[orientation]
+    if active_display(udid).get("currentOrientation") == target:
+        return
+    for device_orientation in DEVICE_ORIENTATIONS:
+        helper(udid, "orientation", device_orientation)
+        time.sleep(SETTLE_SECONDS)
+        if active_display(udid).get("currentOrientation") == target:
+            return
+    raise DuoError(f"the active screen did not rotate to {orientation} (the app may not support it)")
+
+
+def to_native(display, x, y):
+    """Map a point in interface points to the panel's normalized native axes."""
+    width, height = ui_size(display)
+    u, v = x / width, y / height
+    rotation = display.get("currentOrientation")
+    if rotation == "rot90":
+        return v, 1 - u
+    if rotation == "rot180":
+        return 1 - u, 1 - v
+    if rotation == "rot270":
+        return 1 - v, u
+    return u, v
+
+
+def touch_target(udid, x, y):
+    display = active_display(udid)
+    width, height = ui_size(display)
+    if not (0 <= x <= width and 0 <= y <= height):
+        raise DuoError(f"({x}, {y}) is outside the active screen ({width:g}x{height:g} points)")
+    return display, to_native(display, x, y)
+
+
+def tap(udid, x, y, hold):
+    display, (nx, ny) = touch_target(udid, x, y)
+    helper(udid, "tap", display["uniqueId"], f"{nx:.5f}", f"{ny:.5f}", hold)
+
+
+def swipe(udid, x1, y1, x2, y2, seconds):
+    display, (nx1, ny1) = touch_target(udid, x1, y1)
+    _, (nx2, ny2) = touch_target(udid, x2, y2)
+    helper(udid, "swipe", display["uniqueId"], f"{nx1:.5f}", f"{ny1:.5f}", f"{nx2:.5f}", f"{ny2:.5f}", seconds)
+
+
+def screenshot(udid, path):
+    display = active_display(udid)
+    run(["xcrun", "simctl", "io", udid, "screenshot", f"--display={display['displayId']}", path])
+    return path
+
+
+# ---------------------------------------------------------------- accessibility
+
+
+def axe_binary():
+    found = shutil.which("axe")
+    if found:
+        return found
+    for pattern in ("/opt/homebrew/Cellar/xcodebuildmcp/*/libexec/bundled/axe",
+                    str(Path.home() / ".npm/_npx/*/node_modules/xcodebuildmcp/bundled/axe")):
+        matches = sorted(Path("/").glob(pattern.lstrip("/")))
+        if matches:
+            return str(matches[-1])
+    return None
+
+
+def elements(udid):
+    axe = axe_binary()
+    if not axe:
+        raise DuoError("--label needs the AXe CLI (brew install cameroncooke/axe/axe) to read the accessibility tree")
+    tree = json.loads(run([axe, "describe-ui", "--udid", udid]).stdout)
+    found = []
+
+    def walk(node):
+        frame = node.get("frame")
+        if frame and (node.get("AXLabel") or node.get("AXUniqueId")):
+            found.append({
+                "type": node.get("type"),
+                "label": node.get("AXLabel"),
+                "identifier": node.get("AXUniqueId"),
+                "frame": frame,
+            })
+        for child in node.get("children") or []:
+            walk(child)
+
+    for root in tree:
+        walk(root)
+    return found
+
+
+def find_element(udid, label, identifier, element_type):
+    width, height = ui_size(active_display(udid))
+
+    def center(element):
+        frame = element["frame"]
+        return frame["x"] + frame["width"] / 2, frame["y"] + frame["height"] / 2
+
+    def on_screen(element):
+        x, y = center(element)
+        return 0 <= x <= width and 0 <= y <= height
+
+    matches = [
+        e for e in elements(udid)
+        if (label is None or e["label"] == label)
+        and (identifier is None or e["identifier"] == identifier)
+        and (element_type is None or e["type"] == element_type)
+    ]
+    visible = [e for e in matches if on_screen(e)]
+    if not visible:
+        detail = f" ({len(matches)} off-screen; scroll first)" if matches else ""
+        raise DuoError(f"no on-screen element matches label={label!r} id={identifier!r} type={element_type!r}{detail}")
+    # The same identifier is often set on a control and its wrapper; prefer the smallest frame.
+    visible.sort(key=lambda e: e["frame"]["width"] * e["frame"]["height"])
+    return center(visible[0])
+
+
+# ---------------------------------------------------------------- CLI
+
+
+def main():
+    parser = argparse.ArgumentParser(prog="duoctl", description=__doc__.splitlines()[0])
+    parser.add_argument("-d", "--device", default=os.environ.get("DUOCTL_UDID"),
+                        help="simulator UDID or name (default: the only booted iPhone Duo)")
+    parser.add_argument("--version", action="version", version=f"duoctl {VERSION}")
+    commands = parser.add_subparsers(dest="command", required=True)
+
+    commands.add_parser("state", help="print hinge angle, active screen, orientation and size as JSON")
+    for posture in ("open", "close", "half"):
+        commands.add_parser(posture, help=f"set the hinge to {POSTURES[posture]}°")
+    hinge = commands.add_parser("hinge", help="set the hinge angle (0 closed … 180 flat)")
+    hinge.add_argument("degrees", type=float)
+
+    rotate_cmd = commands.add_parser("rotate", help="rotate the active screen's interface")
+    rotate_cmd.add_argument("orientation", choices=list(ROTATION_FOR_UI))
+
+    for name, help_text in (("tap", "tap a point (interface points of the active screen) or an element"),
+                            ("long-press", "long-press a point or an element")):
+        command = commands.add_parser(name, help=help_text)
+        command.add_argument("x", type=float, nargs="?")
+        command.add_argument("y", type=float, nargs="?")
+        command.add_argument("--label", help="accessibility label of the element to touch")
+        command.add_argument("--id", dest="identifier", help="accessibility identifier of the element to touch")
+        command.add_argument("--type", dest="element_type", help="element type filter, e.g. Button")
+        if name == "long-press":
+            command.add_argument("--duration", type=float, default=1.0)
+
+    swipe_cmd = commands.add_parser("swipe", help="swipe between two points (interface points)")
+    for coordinate in ("x1", "y1", "x2", "y2"):
+        swipe_cmd.add_argument(coordinate, type=float)
+    swipe_cmd.add_argument("--duration", type=float, default=0.3)
+
+    shot = commands.add_parser("screenshot", help="save a PNG of the screen that is showing the interface")
+    shot.add_argument("path")
+
+    commands.add_parser("elements", help="list labelled accessibility elements with frames (needs AXe)")
+
+    args = parser.parse_args()
+    try:
+        udid = resolve_udid(args.device)
+        if args.command == "state":
+            print(json.dumps(state(udid), indent=2))
+        elif args.command in POSTURES:
+            set_hinge(udid, POSTURES[args.command])
+            print(json.dumps(state(udid), indent=2))
+        elif args.command == "hinge":
+            set_hinge(udid, args.degrees)
+            print(json.dumps(state(udid), indent=2))
+        elif args.command == "rotate":
+            rotate(udid, args.orientation)
+            print(json.dumps(state(udid), indent=2))
+        elif args.command in ("tap", "long-press"):
+            if args.label or args.identifier:
+                x, y = find_element(udid, args.label, args.identifier, args.element_type)
+            elif args.x is not None and args.y is not None:
+                x, y = args.x, args.y
+            else:
+                raise DuoError("pass x y, --label or --id")
+            tap(udid, x, y, args.duration if args.command == "long-press" else 0.08)
+            print(f"{args.command} ({x:g}, {y:g})")
+        elif args.command == "swipe":
+            swipe(udid, args.x1, args.y1, args.x2, args.y2, args.duration)
+            print(f"swipe ({args.x1:g}, {args.y1:g}) -> ({args.x2:g}, {args.y2:g})")
+        elif args.command == "screenshot":
+            print(screenshot(udid, args.path))
+        elif args.command == "elements":
+            print(json.dumps(elements(udid), indent=2))
+    except DuoError as error:
+        print(f"duoctl: {error}", file=sys.stderr)
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()
