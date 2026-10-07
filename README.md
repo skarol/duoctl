@@ -38,7 +38,13 @@ npx skills add skarol/duoctl
 npx openskills install skarol/duoctl
 ```
 
-**On your `PATH`** — from source:
+**On your `PATH`** — with Homebrew, e.g. on CI:
+
+```bash
+brew install skarol/tap/duoctl
+```
+
+or from source:
 
 ```bash
 git clone https://github.com/skarol/duoctl.git
@@ -47,6 +53,21 @@ ln -s "$PWD/duoctl/bin/duoctl" /usr/local/bin/duoctl
 
 The first run compiles a small helper for the simulator with Xcode's clang and caches it
 in `~/.cache/duoctl`.
+
+## On CI
+
+On a macOS runner with Xcode 27.1:
+
+```bash
+brew install skarol/tap/duoctl
+UDID=$(xcrun simctl create ci-duo "iPhone Duo" com.apple.CoreSimulator.SimRuntime.iOS-27-1)
+xcrun simctl boot "$UDID" && xcrun simctl bootstatus "$UDID" -b
+export DUOCTL_UDID="$UDID"
+
+duoctl open
+duoctl rotate portrait
+duoctl screenshot unfolded-portrait.png
+```
 
 ## Usage
 
