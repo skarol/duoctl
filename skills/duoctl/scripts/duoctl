@@ -17,7 +17,7 @@ import tempfile
 import time
 from pathlib import Path
 
-VERSION = "0.1.0"
+VERSION = "0.2.0"
 HELPER_SOURCE = Path(__file__).resolve().parent / "duoctl-helper.m"
 CACHE_DIR = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "duoctl"
 DUO_DEVICE_TYPE = re.compile(r"iPhone-Duo", re.IGNORECASE)

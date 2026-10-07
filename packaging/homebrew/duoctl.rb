@@ -3,7 +3,7 @@
 class Duoctl < Formula
   desc "Fold, rotate and tap the iPhone Duo simulator from the command line"
   homepage "https://github.com/skarol/duoctl"
-  url "https://github.com/skarol/duoctl/archive/refs/tags/v0.1.0.tar.gz"
+  url "https://github.com/skarol/duoctl/archive/refs/tags/v0.2.0.tar.gz"
   sha256 "REPLACED_BY_RELEASE_WORKFLOW"
   license "MIT"
 
