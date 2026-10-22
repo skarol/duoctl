@@ -129,6 +129,23 @@ def ui_size(display):
 
 
 def hinge_angle(udid):
+    angle = hinge_angle_from_devicectl(udid)
+    return angle if angle is not None else hinge_angle_from_log(udid)
+
+
+def hinge_angle_from_log(udid):
+    # Xcode 27.2's devicectl has no `device motion`. locationd logs every hinge target at the
+    # default level, which is kept on disk since boot. None if the hinge was never set since boot.
+    result = run([
+        "xcrun", "simctl", "spawn", udid, "log", "show", "--last", "boot", "--style", "compact",
+        "--predicate",
+        'process == "locationd" AND eventMessage BEGINSWITH "[Interpolation] Starting interpolation to"',
+    ], check=False)
+    angles = re.findall(r"Starting interpolation to (\d+(?:\.\d+)?)", result.stdout)
+    return round(float(angles[-1]), 1) if angles else None
+
+
+def hinge_angle_from_devicectl(udid):
     process = subprocess.Popen(
         ["xcrun", "devicectl", "device", "motion", "hinge-angle", "-d", udid],
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,

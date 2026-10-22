@@ -143,6 +143,8 @@ interface coordinates to the panel's native axes for the current rotation.
 
 State is read back with `xcrun devicectl device info displays` and
 `xcrun devicectl device motion hinge-angle`.
+Xcode 27.2's `devicectl` has no `device motion`; there the hinge angle is the last
+`Starting interpolation to <angle>` line that `locationd` logged since the simulator booted.
 
 ## Limitations
 
