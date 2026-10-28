@@ -130,7 +130,9 @@ orientation:
 | Hinge | `hinge-slider-control` | `range` | degrees, 0–180 |
 | Orientation | `orientation-picker-control` | `enum` | `portrait`, `pud`, `landscape-left`, `landscape-right`, `faceup`, `facedown` |
 
-Both carry `provider = "com.apple.Virtualization"`. `duoctl rotate` tries device
+The `provider` key differs between CoreSimulator versions (`com.apple.Virtualization`
+or `com.apple.Virtualization.VirtualMachines`), so `duoctl` sends every event under both
+names. `duoctl rotate` tries device
 orientations until the active screen reports the rotation you asked for, because the
 same device orientation rotates the cover and inner screens differently.
 
@@ -141,21 +143,30 @@ active display's UUID from `devicectl`, clones that display's touchscreen as a v
 HID service, and dispatches digitizer events through the clone, converting your
 interface coordinates to the panel's native axes for the current rotation.
 
-State is read back with `xcrun devicectl device info displays` and
-`xcrun devicectl device motion hinge-angle`.
+State is read back with `xcrun devicectl device info displays`. The hinge angle comes
+from CoreMotion's private `CMAngleManager`, the same source UIKit's `UIHinge` reads, through
+the helper inside the simulator. (Xcode 27.2 removed `devicectl device motion`.)
 
 ## Limitations
 
 - Simulator only.
-- Relies on private, undocumented interfaces verified with Xcode 27.1 and the iOS 27.1
-  runtime. A future release may change them; `duoctl` checks state after every change so a
+- Relies on private, undocumented interfaces verified with Xcode 27.1 and 27.2 and the
+  iOS 27.1 and 27.2 runtimes. A future release may change them; `duoctl` checks state after every change so a
   break shows up as an error rather than a silent no-op.
 - Device Hub's hinge slider and rotation indicator don't follow changes made by `duoctl`.
+- On the iOS 27.2 runtime, angles between closed and open land within a few degrees of the
+  one you set (`hinge 135` can read back as 128 to 138). 0° and 180° are exact.
+- On the iOS 27.1 runtime, an instant jump between closed and open leaves the simulator
+  unable to switch screens until it is recreated, so `duoctl` always moves the hinge in a
+  short sweep (at least 0.4 s), like Device Hub's slider. A simulator that an older
+  `duoctl` already left stuck needs to be recreated.
 
 ## Credits
 
 The hinge event format was first documented by Artem Novichkov's
-[hinge](https://github.com/artemnovichkov/hinge).
+[hinge](https://github.com/artemnovichkov/hinge), which also showed reading the angle from
+`CMAngleManager`. Thanks to [@capsrock](https://github.com/capsrock) for finding that
+`devicectl device motion` was gone ([#1](https://github.com/skarol/duoctl/pull/1)).
 
 ## License
 

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """duoctl — fold, rotate and touch the iPhone Duo simulator from the command line.
 
-Built for scripts and AI coding agents. Requires Xcode 27.1+ with the iOS 27.1
-simulator runtime and a booted iPhone Duo simulator.
+Built for scripts and AI coding agents. Requires Xcode 27.1+ with an iPhone Duo
+simulator runtime (iOS 27.1 or later) and a booted iPhone Duo simulator.
 """
 
 import argparse
@@ -22,6 +22,9 @@ HELPER_SOURCE = Path(__file__).resolve().parent / "duoctl-helper.m"
 CACHE_DIR = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "duoctl"
 DUO_DEVICE_TYPE = re.compile(r"iPhone-Duo", re.IGNORECASE)
 SETTLE_SECONDS = 0.6
+# The iOS 27.1 runtime stops switching screens after the hinge jumps straight between closed
+# and open, so every hinge change is a short sweep, like Device Hub's slider.
+MIN_SWEEP_SECONDS = 0.4
 SCREEN_SWITCH_TIMEOUT = 8
 COVER_MAX_DEGREES = 30
 INNER_MIN_DEGREES = 120
@@ -91,7 +94,7 @@ def helper_path():
         run([
             "xcrun", "-sdk", "iphonesimulator", "clang", "-fobjc-arc", "-O2",
             "-arch", "arm64", "-mios-simulator-version-min=17.0",
-            "-framework", "Foundation", "-framework", "IOKit",
+            "-framework", "Foundation", "-framework", "IOKit", "-framework", "CoreMotion",
             str(HELPER_SOURCE), "-o", str(built),
         ])
         run(["codesign", "-f", "-s", "-", str(built)])
@@ -100,7 +103,7 @@ def helper_path():
 
 
 def helper(udid, *args):
-    run(["xcrun", "simctl", "spawn", udid, str(helper_path()), *map(str, args)])
+    return run(["xcrun", "simctl", "spawn", udid, str(helper_path()), *map(str, args)]).stdout
 
 
 # ---------------------------------------------------------------- state
@@ -129,21 +132,11 @@ def ui_size(display):
 
 
 def hinge_angle(udid):
-    process = subprocess.Popen(
-        ["xcrun", "devicectl", "device", "motion", "hinge-angle", "-d", udid],
-        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
-    )
+    """The hinge angle in degrees, as CoreMotion reports it, or None when it can't be read."""
     try:
-        deadline = time.time() + 10
-        for line in process.stdout:
-            match = re.search(r"\bAngle:\s*(\d+(?:[.,]\d+)?)", line)
-            if match:
-                return float(match.group(1).replace(",", "."))
-            if time.time() > deadline:
-                break
-    finally:
-        process.kill()
-    return None
+        return float(helper(udid, "hinge-angle").strip())
+    except (DuoError, ValueError):
+        return None
 
 
 def state(udid):
@@ -174,11 +167,11 @@ def expected_screen(degrees):
 
 
 def set_hinge(udid, degrees, duration=0):
-    if duration > 0:
-        current = hinge_angle(udid)
-        helper(udid, "hinge-sweep", 180 if current is None else current, degrees, duration)
-    else:
+    current = hinge_angle(udid)
+    if current is None:
         helper(udid, "hinge", degrees)
+    else:
+        helper(udid, "hinge-sweep", current, degrees, max(duration, MIN_SWEEP_SECONDS))
     expected = expected_screen(degrees)
     deadline = time.time() + SCREEN_SWITCH_TIMEOUT
     while time.time() < deadline:

@@ -65,18 +65,26 @@ static const double kMoveRate = 60.0;
 
 #pragma mark - Device state (hinge, orientation)
 
+// Device Hub's provider name differs between CoreSimulator versions. Every event carries an
+// absolute value, so sending it under both names is harmless and each version takes its own.
+static NSArray<NSString *> *deviceStateProviders(void) {
+    return @[ @"com.apple.Virtualization.VirtualMachines", @"com.apple.Virtualization" ];
+}
+
 static void dispatchDeviceState(IOHIDEventSystemClientRef client, NSString *source, NSString *type, id value) {
-    NSDictionary *payload = @{
-        @"provider": @"com.apple.Virtualization",
-        @"source": source,
-        @"type": type,
-        @"value": value,
-    };
-    NSData *data = CFBridgingRelease(IOCFSerialize((__bridge CFTypeRef)payload, kSerializeBinary));
-    IOHIDEventRef event = IOHIDEventCreateVendorDefinedEvent(NULL, mach_absolute_time(), kVendorUsagePage, kVendorUsage,
-                                                             0, data.bytes, (CFIndex)data.length, 0);
-    IOHIDEventSystemClientDispatchEvent(client, event);
-    CFRelease(event);
+    for (NSString *provider in deviceStateProviders()) {
+        NSDictionary *payload = @{
+            @"provider": provider,
+            @"source": source,
+            @"type": type,
+            @"value": value,
+        };
+        NSData *data = CFBridgingRelease(IOCFSerialize((__bridge CFTypeRef)payload, kSerializeBinary));
+        IOHIDEventRef event = IOHIDEventCreateVendorDefinedEvent(NULL, mach_absolute_time(), kVendorUsagePage,
+                                                                 kVendorUsage, 0, data.bytes, (CFIndex)data.length, 0);
+        IOHIDEventSystemClientDispatchEvent(client, event);
+        CFRelease(event);
+    }
 }
 
 static IOHIDEventSystemClientRef deviceStateClient(void) {
@@ -258,11 +266,49 @@ static int swipe(NSString *displayUUID, double x1, double y1, double x2, double 
     return ok ? 0 : 1;
 }
 
+#pragma mark - Hinge angle
+
+// CoreMotion's private angle manager, the source UIKit's UIHinge reads.
+@interface CMAngle : NSObject
+- (float)angleDegrees;
+@end
+
+@interface CMAngleManager : NSObject
++ (BOOL)isAvailable;
+- (void)startAngleUpdatesToQueue:(NSOperationQueue *)queue handler:(void (^)(CMAngle *angle))handler;
+- (void)stopAngleUpdates;
+@end
+
+static const CFTimeInterval kAngleTimeout = 2;
+
+// Prints the current hinge angle in degrees. CoreMotion delivers the current value right away.
+static int printHingeAngle(void) {
+    Class managerClass = NSClassFromString(@"CMAngleManager");
+    if (!managerClass || ![managerClass isAvailable]) {
+        fprintf(stderr, "duoctl-helper: this simulator reports no hinge\n");
+        return 1;
+    }
+    CMAngleManager *manager = [[managerClass alloc] init];
+    __block BOOL printed = NO;
+    [manager startAngleUpdatesToQueue:[NSOperationQueue new] handler:^(CMAngle *angle) {
+        if (printed) return;
+        printed = YES;
+        printf("%.1f\n", [angle angleDegrees]);
+        fflush(stdout);
+        CFRunLoopStop(CFRunLoopGetMain());
+    }];
+    CFRunLoopRunInMode(kCFRunLoopDefaultMode, kAngleTimeout, false);
+    [manager stopAngleUpdates];
+    if (!printed) fprintf(stderr, "duoctl-helper: timed out reading the hinge angle\n");
+    return printed ? 0 : 1;
+}
+
 #pragma mark - Entry point
 
 static int usage(void) {
     fprintf(stderr,
             "usage: duoctl-helper hinge <degrees>\n"
+            "       duoctl-helper hinge-angle\n"
             "       duoctl-helper hinge-sweep <from> <to> <seconds>\n"
             "       duoctl-helper orientation <portrait|pud|landscape-left|landscape-right|faceup|facedown>\n"
             "       duoctl-helper tap <displayUUID> <nx> <ny> [hold-seconds]\n"
@@ -279,6 +325,9 @@ int main(int argc, char **argv) {
         if ([command isEqualToString:@"hinge"] && argc == 3) {
             double degrees = fmin(fmax(atof(argv[2]), 0), 180);
             return postDeviceState(@"hinge-slider-control", @"range", @(degrees));
+        }
+        if ([command isEqualToString:@"hinge-angle"] && argc == 2) {
+            return printHingeAngle();
         }
         if ([command isEqualToString:@"hinge-sweep"] && argc == 5) {
             double from = fmin(fmax(atof(argv[2]), 0), 180), to = fmin(fmax(atof(argv[3]), 0), 180);
