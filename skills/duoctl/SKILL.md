@@ -51,6 +51,10 @@ Every command that changes state prints `state` afterwards — read it instead o
   while folded (a black image). Use `duoctl screenshot`.
 - The first run compiles a small in-simulator helper with Xcode's clang and caches it in
   `~/.cache/duoctl`.
-- Built on private, undocumented simulator interfaces verified with Xcode 27.1 and the
-  iOS 27.1 runtime. If a command succeeds but `state` doesn't change, report that the
-  interface has likely changed rather than retrying.
+- Built on private, undocumented simulator interfaces verified with Xcode 27.1 and 27.2 and
+  the iOS 27.1 and 27.2 runtimes. If a command succeeds but `state` doesn't change, report
+  that the interface has likely changed rather than retrying.
+- On the iOS 27.2 runtime, angles between closed and open land within a few degrees of the
+  one you set, so compare `hingeAngle` with a tolerance. 0° and 180° are exact.
+- If a Duo simulator never switches to the cover screen after `close`, it was probably left
+  stuck by an instant hinge jump from an older duoctl. Recreate it rather than retrying.
